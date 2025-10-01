@@ -35,15 +35,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { model = "gpt-5-nano", temperature = 0.7, messages = [], stream } = req.body;
+    const { model = "gpt-5-nano", temperature = 0.7, messages = [] } = req.body;
 
     const talkaiBody = {
       type: "chat",
       messagesHistory: convertMessagesToTalkai(messages),
-      settings: {
-        model,
-        temperature,
-      },
+      settings: { model, temperature },
     };
 
     const talkaiResponse = await axios({
@@ -55,70 +52,39 @@ export default async function handler(req, res) {
       timeout: 120000,
     });
 
-    const contentType = talkaiResponse.headers["content-type"] || "";
+    let fullText = "";
 
-    if (contentType.includes("text/event-stream") || stream === true) {
-      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-
-      talkaiResponse.data.on("data", (chunk) => {
-        res.write(chunk);
+    talkaiResponse.data.on("data", (chunk) => {
+      const str = chunk.toString();
+      // Cada linha que começa com "data: " é uma parte da resposta
+      str.split("\n").forEach((line) => {
+        if (line.startsWith("data: ")) {
+          const textPart = line.replace(/^data: /, "").trim();
+          if (textPart && textPart !== "-1") fullText += textPart + " ";
+        }
       });
+    });
 
-      talkaiResponse.data.on("end", () => {
-        res.write("\n\n");
-        res.end();
-      });
-
-      talkaiResponse.data.on("error", (err) => {
-        console.error("Erro no stream do talkai:", err.message || err);
-        try { res.end(); } catch (e) {}
-      });
-
-      return;
-    } else {
-      const chunks = [];
-      for await (const chunk of talkaiResponse.data) {
-        chunks.push(chunk);
-      }
-      const raw = Buffer.concat(chunks).toString("utf8");
-      let talkaiJson;
-      try {
-        talkaiJson = JSON.parse(raw);
-      } catch (e) {
-        return res.json({
-          id: "chatcmpl-" + Date.now(),
-          object: "chat.completion",
-          model,
-          choices: [
-            {
-              index: 0,
-              message: { role: "assistant", content: raw },
-              finish_reason: "stop",
-            },
-          ],
-        });
-      }
-
-      const replyText =
-        (talkaiJson && (talkaiJson.reply || talkaiJson.content || talkaiJson.message)) ||
-        JSON.stringify(talkaiJson);
-
-      return res.json({
+    talkaiResponse.data.on("end", () => {
+      fullText = fullText.trim();
+      res.status(200).json({
         id: "chatcmpl-" + Date.now(),
         object: "chat.completion",
         model,
         choices: [
           {
             index: 0,
-            message: { role: "assistant", content: replyText },
+            message: { role: "assistant", content: fullText },
             finish_reason: "stop",
           },
         ],
       });
-    }
+    });
+
+    talkaiResponse.data.on("error", (err) => {
+      console.error("Erro no stream do talkai:", err.message || err);
+      res.status(500).json({ error: "Erro ao processar a resposta do talkai" });
+    });
   } catch (err) {
     console.error("Erro no proxy para talkai:", err?.response?.data || err.message || err);
     res.status(500).json({ error: "Erro interno ao processar a requisição." });
